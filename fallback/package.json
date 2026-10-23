@@ -1,0 +1,5 @@
+{
+  "name": "stc-n8n-fallback",
+  "private": true,
+  "scripts": { "test": "node --test" }
+}

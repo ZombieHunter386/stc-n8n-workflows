@@ -177,6 +177,38 @@ If GCal sync succeeded but IG flow failed (or vice versa) for a specific event:
 
 ---
 
+## Eventbrite poller fallback (added 2026-10-23)
+
+**Why it exists:** Eventbrite's webhook delivery for STC has stalled several times (Aug 2026 ~2h; 2026-10-16 → 10-20, four days). While stalled, new events never reached Google Calendar or got a Slack approval card, and when the queue finally drained it posted a *duplicate* card. The fallback makes both paths self-healing and makes duplicate cards impossible.
+
+**Pieces:**
+- **STC Eventbrite Poller (fallback)** (`stcEbPoller00001`): every 15 min it lists STC's live Eventbrite events, then:
+  - re-sends an event to the GCal webhook if its Google Calendar entry is missing, cancelled, or older than the event's last Eventbrite change. This is safe because the GCal path is idempotent;
+  - re-sends it to the IG webhook if the event went live more than 10 min ago and has no `carded` row. The 10-minute grace lets the normal webhook win when Eventbrite is healthy.
+- **STC IG — Trigger** (`x91bE62LWVaIe43D`): before the AI draft it writes a *claim* row to the `stc_event_cards` Data Table. Only the earliest fresh claim continues, and it first checks the last 90 days of #events-approval for an existing card. Duplicates are recorded as `duplicate` and stop. Cards the poller rescued carry a grey ":satellite_antenna: Picked up by the fallback poller" line. **If you see that line, Eventbrite's webhooks are stalling.**
+- **STC Error Alert** (`stcErrAlert00001`): any failure in the poller or the IG trigger posts to #events-approval with a link to the failed execution.
+- **Source + tests:** `fallback/` in this repo. `node --test` runs the tests; `node build.js` regenerates the workflow JSON. The design spec is in Hunter's `~/Claude/docs/superpowers/specs/2026-10-16-stc-eventbrite-poller-fallback-design.md`.
+
+**Common operations:**
+- **Force a fresh approval card for an event:** in n8n → Data tables → `stc_event_cards`, delete that event's rows (match on `card_key` / `event_id`). Also delete the old card in #events-approval, because the trigger checks Slack for an existing card before posting. The next poll (≤15 min) posts a new card.
+- **Run a poll right now:** `curl -X POST https://automate.strongtownschicago.org/webhook/stc-poller-run-1f1009ee31bd21ec`. Safe to run any time, because polls are idempotent.
+- **Pause the fallback:** in the n8n UI, deactivate "STC Eventbrite Poller (fallback)". The IG trigger keeps deduping on its own.
+- **Never delete the `__seeded__` row.** It tells the poller the table is already initialised. If the table is lost (e.g. a restore from this repo, which does not back up Data Table rows), the first poll recreates it and marks every currently-live event as carded without posting cards. It then posts a "seeded" note listing those events.
+
+**Alerts you may see:**
+- **"Poller: … still out of sync with Google Calendar after 3 runs":** the GCal workflow or the Google credential is failing. Check its executions.
+- **"Poller: … went live over an hour ago and still has no approval card":** the IG trigger is failing. Check its executions.
+- **":rotating_light: n8n workflow … failed":** follow the execution link. If Eventbrite's API or the Data Table is down, this repeats every 15 min until it is fixed.
+
+**Known limitation:** if Slack accepts a card but recording it fails 3 times (or the post times out), *and* someone approves the card before the retry (~30–45 min later), a second card can appear. The error alert fires first.
+
+**Deploy/redeploy:**
+1. `node build.js`, then copy `out/*.json` into the container.
+2. `n8n import:workflow --input=… --projectId=4WonX20XyNi7Nvwj` → `n8n publish:workflow --id=…` → `docker compose restart n8n`. The CLI changes only take effect after a restart.
+3. Always deploy the poller before the IG trigger on a fresh instance, so the table exists and is seeded first.
+
+---
+
 ## Credential map
 
 What's in n8n and what each credential is used for:
@@ -272,3 +304,4 @@ Every credential is tied to Hunter personally: DigitalOcean, GitHub backup repo 
 
 - **2026-05-24** Plan 01 complete — droplet, n8n, Caddy, backup pipeline live
 - **2026-05-25** Plan 02 — Phase 2 (GCal sync) + Phase 3 (IG approval with IG stub) + Phase 5 (Squarespace) shipped. Runbook added.
+- **2026-10-23** Eventbrite poller fallback + IG-trigger dedupe + error alert shipped (see "Eventbrite poller fallback"). Source in `fallback/`.
